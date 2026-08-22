@@ -3,6 +3,36 @@ from datetime import date
 from agents import function_tool
 
 
+def get_price_history_raw(ticker: str) -> dict:
+    """Fetch 1Y of daily price history for a ticker. Returns dict with prices list."""
+    import yfinance as yf
+    try:
+        stock = yf.Ticker(ticker)
+        hist = stock.history(period="1y")
+        if hist is None or hist.empty:
+            return {"ticker": ticker, "prices": [], "error": "No price history available"}
+        prices = [
+            {
+                "date": str(idx.date()),
+                "close": round(float(row["Close"]), 2),
+                "volume": int(row["Volume"]) if row["Volume"] else 0,
+                "high": round(float(row["High"]), 2),
+                "low": round(float(row["Low"]), 2),
+            }
+            for idx, row in hist.iterrows()
+        ]
+        closes = [p["close"] for p in prices if p["close"]]
+        return {
+            "ticker": ticker.upper(),
+            "prices": prices,
+            "as_of": date.today().isoformat(),
+            "52wk_high": max(closes) if closes else None,
+            "52wk_low": min(closes) if closes else None,
+        }
+    except Exception as e:
+        return {"ticker": ticker, "prices": [], "error": str(e)}
+
+
 @function_tool
 def get_stock_financials(ticker: str) -> str:
     """Get financial data for a stock ticker using yfinance."""

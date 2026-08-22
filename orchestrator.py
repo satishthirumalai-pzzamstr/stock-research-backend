@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from tools.yfinance_tool import get_stock_financials
+from tools.yfinance_tool import get_stock_financials, get_price_history_raw
 from tools.tavily_tool import search_comparable_companies, search_analyst_news
 from tools.edgar_tool import get_10k_risk_factors
 
@@ -277,18 +277,23 @@ async def run_research_pipeline(ticker: str) -> AsyncGenerator[str, None]:
         return
     yield sse({"stage": "validation", "status": "done"})
 
-    # Fan out — financial, comps, risk, and analyst coverage run in parallel
+    # Fan out — financial, comps, risk, analyst coverage, and price history run in parallel
     yield sse({"stage": "financial_data", "status": "running"})
     yield sse({"stage": "comps", "status": "running"})
     yield sse({"stage": "risk", "status": "running"})
     yield sse({"stage": "analyst_coverage", "status": "running"})
 
-    financial_raw, comps_raw, risk_raw, coverage_raw = await asyncio.gather(
+    loop = asyncio.get_event_loop()
+    financial_raw, comps_raw, risk_raw, coverage_raw, price_history = await asyncio.gather(
         run_agent(financial_data_agent, f"Fetch financial data for ticker: {ticker}"),
         run_agent(comps_agent, f"Find comparable companies for ticker: {ticker}"),
         run_agent(risk_agent, f"Get 10-K risk factors for ticker: {ticker}"),
         run_agent(analyst_coverage_agent, f"Get analyst coverage and consensus for ticker: {ticker}"),
+        loop.run_in_executor(None, get_price_history_raw, ticker),
     )
+
+    # Stream price data immediately so chart renders before the report is ready
+    yield sse({"stage": "price_data", "status": "done", "price_history": price_history})
 
     yield sse({"stage": "financial_data", "status": "done"})
     yield sse({"stage": "comps", "status": "done"})
