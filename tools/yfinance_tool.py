@@ -8,7 +8,7 @@ def get_price_history_raw(ticker: str) -> dict:
     import yfinance as yf
     try:
         stock = yf.Ticker(ticker)
-        hist = stock.history(period="1y")
+        hist = stock.history(period="max")
         if hist is None or hist.empty:
             return {"ticker": ticker, "prices": [], "error": "No price history available"}
         prices = [
