@@ -186,19 +186,34 @@ def get_insider_trades_raw(ticker: str) -> dict:
 
             date_col = _col("startdate", "date", "transactiondate")
             insider_col = _col("insider", "name", "reportingname")
-            title_col = _col("insidertitle", "title", "position", "relationship")
+            title_col = _col("position", "insidertitle", "title", "relationship")
             txn_col = _col("transaction", "transactiontype", "type")
+            text_col = _col("text", "description")
             shares_col = _col("shares", "sharestransacted", "transactionshares")
             value_col = _col("value", "transactionvalue", "totalvalue")
 
             for _, row in df.head(20).iterrows():
                 shares = row[shares_col] if shares_col else None
                 value = row[value_col] if value_col else None
+                # Transaction type: prefer explicit column, fall back to parsing Text
+                txn = str(row[txn_col]).strip() if txn_col else ""
+                if not txn or txn == "nan":
+                    text = str(row[text_col]).lower() if text_col else ""
+                    if "sale" in text or "sell" in text:
+                        txn = "Sale"
+                    elif "purchase" in text or "buy" in text or "acquisition" in text:
+                        txn = "Purchase"
+                    elif "option" in text or "exercise" in text:
+                        txn = "Option Exercise"
+                    elif "gift" in text:
+                        txn = "Gift"
+                    else:
+                        txn = text[:40] if text else ""
                 trade = {
                     "date": str(row[date_col])[:10] if date_col else "",
                     "insider": str(row[insider_col]) if insider_col else "",
                     "title": str(row[title_col]) if title_col else "",
-                    "transaction": str(row[txn_col]) if txn_col else "",
+                    "transaction": txn,
                     "shares": int(shares) if shares is not None and str(shares) != "nan" else None,
                     "value": float(value) if value is not None and str(value) != "nan" else None,
                     "shares_total": None,
