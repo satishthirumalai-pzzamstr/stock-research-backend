@@ -175,14 +175,30 @@ def get_insider_trades_raw(ticker: str) -> dict:
         trades = []
         if transactions is not None and not transactions.empty:
             df = transactions.reset_index()
+            cols_lower = {c.lower().replace(" ", "").replace("_", ""): c for c in df.columns}
+
+            def _col(*names):
+                for n in names:
+                    key = n.lower().replace(" ", "").replace("_", "")
+                    if key in cols_lower:
+                        return cols_lower[key]
+                return None
+
+            date_col = _col("startdate", "date", "transactiondate")
+            insider_col = _col("insider", "name", "reportingname")
+            title_col = _col("insidertitle", "title", "position", "relationship")
+            txn_col = _col("transaction", "transactiontype", "type")
+            shares_col = _col("shares", "sharestransacted", "transactionshares")
+            value_col = _col("value", "transactionvalue", "totalvalue")
+
             for _, row in df.head(20).iterrows():
-                shares = row.get("Shares", row.get("shares", None))
-                value = row.get("Value", row.get("value", None))
+                shares = row[shares_col] if shares_col else None
+                value = row[value_col] if value_col else None
                 trade = {
-                    "date": str(row.get("Start Date", row.get("startDate", row.get("Date", "")))),
-                    "insider": str(row.get("Insider", row.get("insider", ""))),
-                    "title": str(row.get("Insider Title", row.get("insiderTitle", row.get("title", "")))),
-                    "transaction": str(row.get("Transaction", row.get("transaction", ""))),
+                    "date": str(row[date_col])[:10] if date_col else "",
+                    "insider": str(row[insider_col]) if insider_col else "",
+                    "title": str(row[title_col]) if title_col else "",
+                    "transaction": str(row[txn_col]) if txn_col else "",
                     "shares": int(shares) if shares is not None and str(shares) != "nan" else None,
                     "value": float(value) if value is not None and str(value) != "nan" else None,
                     "shares_total": None,
