@@ -3,6 +3,64 @@ from datetime import date
 from agents import function_tool
 
 
+def get_insider_trades_raw(ticker: str) -> dict:
+    """Fetch recent insider transactions from SEC Form 4 filings via yfinance."""
+    import yfinance as yf
+    try:
+        stock = yf.Ticker(ticker)
+        transactions = stock.insider_transactions
+        purchases = stock.insider_purchases
+
+        trades = []
+        if transactions is not None and not transactions.empty:
+            df = transactions.reset_index()
+            for _, row in df.head(20).iterrows():
+                shares = row.get("Shares", row.get("shares", None))
+                value = row.get("Value", row.get("value", None))
+                trade = {
+                    "date": str(row.get("Start Date", row.get("startDate", row.get("Date", "")))),
+                    "insider": str(row.get("Insider", row.get("insider", ""))),
+                    "title": str(row.get("Insider Title", row.get("insiderTitle", row.get("title", "")))),
+                    "transaction": str(row.get("Transaction", row.get("transaction", ""))),
+                    "shares": int(shares) if shares is not None and str(shares) != "nan" else None,
+                    "value": float(value) if value is not None and str(value) != "nan" else None,
+                    "shares_total": None,
+                }
+                trades.append(trade)
+
+        # Net summary from insider_purchases
+        summary = {}
+        if purchases is not None and not purchases.empty:
+            df2 = purchases.reset_index()
+            for _, row in df2.iterrows():
+                label = str(row.get("Insider Purchases Last 6m", row.get("", ""))).strip()
+                purchases_val = row.get("Purchases", None)
+                sales_val = row.get("Sales", None)
+                if purchases_val is not None or sales_val is not None:
+                    summary = {
+                        "purchases_6m": int(purchases_val) if purchases_val is not None and str(purchases_val) != "nan" else None,
+                        "sales_6m": int(sales_val) if sales_val is not None and str(sales_val) != "nan" else None,
+                    }
+                    break
+
+        # Compute net signal
+        buys = sum(1 for t in trades if "buy" in t["transaction"].lower() or "purchase" in t["transaction"].lower())
+        sells = sum(1 for t in trades if "sell" in t["transaction"].lower() or "sale" in t["transaction"].lower())
+        net_signal = "Bullish" if buys > sells * 1.5 else ("Bearish" if sells > buys * 1.5 else "Neutral")
+
+        return {
+            "ticker": ticker.upper(),
+            "trades": trades,
+            "summary_6m": summary,
+            "buys_count": buys,
+            "sells_count": sells,
+            "net_signal": net_signal,
+            "as_of": date.today().isoformat(),
+        }
+    except Exception as e:
+        return {"ticker": ticker, "trades": [], "error": str(e), "net_signal": "Unknown"}
+
+
 def get_price_history_raw(ticker: str) -> dict:
     """Fetch 1Y of daily price history for a ticker. Returns dict with prices list."""
     import yfinance as yf

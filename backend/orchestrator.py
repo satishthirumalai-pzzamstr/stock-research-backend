@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from tools.yfinance_tool import get_stock_financials, get_price_history_raw
+from tools.yfinance_tool import get_stock_financials, get_price_history_raw, get_insider_trades_raw
 from tools.tavily_tool import search_comparable_companies, search_analyst_news
 from tools.edgar_tool import get_10k_risk_factors
 
@@ -142,7 +142,7 @@ analyst_agent = Agent(
     name="Analyst Agent",
     instructions=(
         "You are the Analyst Agent. You receive JSON with financial_snapshot, comps, risk_summary, "
-        "and analyst_coverage.\n"
+        "analyst_coverage, and insider_activity.\n"
         "Produce a JSON object:\n"
         "  signal: exactly 'BUY', 'HOLD', or 'SELL'\n"
         "  confidence: 'High', 'Medium', or 'Low'\n"
@@ -160,6 +160,8 @@ analyst_agent = Agent(
         "    valuation_assessment: 'Rich'/'Fair'/'Cheap' with 1-sentence rationale\n"
         "  capital_return_summary: 2-3 sentences covering dividend yield, buyback program, "
         "net cash/debt position — use data from financial_snapshot\n"
+        "  insider_signal: object with net_signal ('Bullish'/'Bearish'/'Neutral'/'Unknown'), "
+        "buys_count, sells_count, and a 1-sentence interpretation of what recent insider activity implies\n"
         "  comps_analysis: object with pe, ev_ebitda, revenue keys each containing "
         "{subject, peer_median, premium_discount_pct}\n"
         "  risk_summary: 2-3 sentence synthesis of the highest-severity risks\n"
@@ -187,6 +189,7 @@ writer_agent = Agent(
         "### Risk Factors\n"
         "### Path to Upside — What Needs to Change\n"
         "### Investment Signal\n"
+        "### Insider Activity\n"
         "### Data Sources & As-Of Dates\n\n"
         "Formatting rules:\n"
         "- Use Markdown tables for: Key Financials, Peer Comparison, analyst calls, scenarios.\n"
@@ -206,6 +209,10 @@ writer_agent = Agent(
         "Bold the most company-specific, material risks.\n"
         "- Path to Upside: numbered list of what_needs_to_change with current vs. required figures. "
         "Bear/Base/Bull scenario table. Near-term catalysts table.\n"
+        "- Insider Activity: table of recent trades (Date | Insider | Title | Transaction | Shares | Value). "
+        "Show net_signal as a badge (Bullish/Bearish/Neutral) with buys vs sells count. "
+        "Include 1-2 sentences interpreting the insider activity. "
+        "If no trades available, note 'No recent insider transactions reported.'\n"
         "- Investment Signal: show signal, confidence, confidence_drivers as a bulleted list, "
         "valuation_assessment, capital_return_summary, and rationale. "
         "If data_quality_flags is non-empty, show a ⚠ Data Quality Notice section listing them.\n"
@@ -284,12 +291,13 @@ async def run_research_pipeline(ticker: str) -> AsyncGenerator[str, None]:
     yield sse({"stage": "analyst_coverage", "status": "running"})
 
     loop = asyncio.get_event_loop()
-    financial_raw, comps_raw, risk_raw, coverage_raw, price_history = await asyncio.gather(
+    financial_raw, comps_raw, risk_raw, coverage_raw, price_history, insider_data = await asyncio.gather(
         run_agent(financial_data_agent, f"Fetch financial data for ticker: {ticker}"),
         run_agent(comps_agent, f"Find comparable companies for ticker: {ticker}"),
         run_agent(risk_agent, f"Get 10-K risk factors for ticker: {ticker}"),
         run_agent(analyst_coverage_agent, f"Get analyst coverage and consensus for ticker: {ticker}"),
         loop.run_in_executor(None, get_price_history_raw, ticker),
+        loop.run_in_executor(None, get_insider_trades_raw, ticker),
     )
 
     # Stream price data immediately so chart renders before the report is ready
@@ -325,6 +333,7 @@ async def run_research_pipeline(ticker: str) -> AsyncGenerator[str, None]:
             "comps": comps_data,
             "risk_summary": risk_data,
             "analyst_coverage": coverage_data,
+            "insider_activity": insider_data,
         },
         indent=2,
     )
@@ -386,6 +395,7 @@ async def run_research_pipeline(ticker: str) -> AsyncGenerator[str, None]:
             "analyst_coverage": coverage_data,
             "catalyst_analysis": catalyst_data,
             "analyst_verdict": analyst_verdict,
+            "insider_activity": insider_data,
         },
         indent=2,
     )
