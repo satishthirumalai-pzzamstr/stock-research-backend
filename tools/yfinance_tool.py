@@ -3,6 +3,167 @@ from datetime import date
 from agents import function_tool
 
 
+def get_earnings_data_raw(ticker: str) -> dict:
+    """Fetch earnings history, forward estimates, EPS revisions, and next earnings date."""
+    import yfinance as yf
+
+    try:
+        stock = yf.Ticker(ticker)
+        result: dict = {"ticker": ticker.upper(), "as_of": date.today().isoformat()}
+
+        # Historical quarterly earnings (EPS actual vs estimate)
+        quarterly_eps = []
+        try:
+            qe = stock.quarterly_earnings
+            if qe is not None and not qe.empty:
+                df = qe.reset_index()
+                for _, row in df.head(8).iterrows():
+                    actual = row.get("Earnings", row.get("actual", None))
+                    estimate = row.get("Revenue", None)  # fallback
+                    # Try better column names
+                    for col in df.columns:
+                        cl = col.lower()
+                        if "actual" in cl or "earnings" in cl:
+                            actual = row[col]
+                        if "estimate" in cl:
+                            estimate = row[col]
+                    quarter = str(row.get("Quarter", row.get("index", row.get("Date", ""))))
+                    actual_f = float(actual) if actual is not None and str(actual) != "nan" else None
+                    est_f = float(estimate) if estimate is not None and str(estimate) != "nan" else None
+                    surprise_pct = None
+                    if actual_f is not None and est_f is not None and est_f != 0:
+                        surprise_pct = round((actual_f - est_f) / abs(est_f) * 100, 1)
+                    quarterly_eps.append({
+                        "quarter": quarter,
+                        "eps_estimate": est_f,
+                        "eps_actual": actual_f,
+                        "surprise_pct": surprise_pct,
+                        "beat": (actual_f > est_f) if (actual_f is not None and est_f is not None) else None,
+                    })
+        except Exception:
+            pass
+        result["quarterly_eps_history"] = quarterly_eps
+
+        # Earnings dates (upcoming + recent)
+        earnings_dates = []
+        next_earnings_date = None
+        try:
+            ed = stock.earnings_dates
+            if ed is not None and not ed.empty:
+                df = ed.reset_index()
+                today_str = date.today().isoformat()
+                for _, row in df.head(6).iterrows():
+                    dt = str(row.get("Earnings Date", row.iloc[0] if len(row) > 0 else ""))[:10]
+                    eps_est = None
+                    eps_act = None
+                    for col in df.columns:
+                        cl = col.lower()
+                        if "estimate" in cl:
+                            v = row[col]
+                            eps_est = float(v) if v is not None and str(v) != "nan" else None
+                        if "reported" in cl or "actual" in cl:
+                            v = row[col]
+                            eps_act = float(v) if v is not None and str(v) != "nan" else None
+                    earnings_dates.append({"date": dt, "eps_estimate": eps_est, "eps_actual": eps_act})
+                    if dt >= today_str and next_earnings_date is None:
+                        next_earnings_date = dt
+        except Exception:
+            pass
+        result["earnings_dates"] = earnings_dates
+        result["next_earnings_date"] = next_earnings_date
+
+        # Forward EPS estimates (next 2 quarters + 2 annual)
+        eps_forward = []
+        try:
+            ef = stock.earnings_forecast
+            if ef is not None and not ef.empty:
+                df = ef.reset_index()
+                for _, row in df.head(6).iterrows():
+                    period = str(row.get("Period", row.iloc[0] if len(row) > 0 else ""))
+                    avg = row.get("Avg", None)
+                    low = row.get("Low", None)
+                    high = row.get("High", None)
+                    num = row.get("No. of Analysts", row.get("NumberOfAnalysts", None))
+                    eps_forward.append({
+                        "period": period,
+                        "eps_avg": float(avg) if avg is not None and str(avg) != "nan" else None,
+                        "eps_low": float(low) if low is not None and str(low) != "nan" else None,
+                        "eps_high": float(high) if high is not None and str(high) != "nan" else None,
+                        "num_analysts": int(num) if num is not None and str(num) != "nan" else None,
+                    })
+        except Exception:
+            pass
+        result["eps_forward_estimates"] = eps_forward
+
+        # Revenue estimates
+        revenue_estimates = []
+        try:
+            re = stock.revenue_estimate
+            if re is not None and not re.empty:
+                df = re.reset_index()
+                for _, row in df.head(4).iterrows():
+                    period = str(row.get("Period", row.iloc[0] if len(row) > 0 else ""))
+                    avg = row.get("Avg", None)
+                    low = row.get("Low", None)
+                    high = row.get("High", None)
+                    growth = row.get("Growth", None)
+                    revenue_estimates.append({
+                        "period": period,
+                        "revenue_avg": float(avg) if avg is not None and str(avg) != "nan" else None,
+                        "revenue_low": float(low) if low is not None and str(low) != "nan" else None,
+                        "revenue_high": float(high) if high is not None and str(high) != "nan" else None,
+                        "yoy_growth_est": float(growth) if growth is not None and str(growth) != "nan" else None,
+                    })
+        except Exception:
+            pass
+        result["revenue_estimates"] = revenue_estimates
+
+        # EPS revisions (analysts raising vs lowering)
+        eps_revisions = {}
+        try:
+            er = stock.eps_revisions
+            if er is not None and not er.empty:
+                df = er.reset_index()
+                for _, row in df.iterrows():
+                    period = str(row.get("Period", row.iloc[0] if len(row) > 0 else ""))
+                    up = row.get("Up Last 7 Days", row.get("upLast7days", None))
+                    down = row.get("Down Last 7 Days", row.get("downLast7days", None))
+                    up30 = row.get("Up Last 30 Days", row.get("upLast30days", None))
+                    down30 = row.get("Down Last 30 Days", row.get("downLast30days", None))
+                    eps_revisions[period] = {
+                        "up_7d": int(up) if up is not None and str(up) != "nan" else None,
+                        "down_7d": int(down) if down is not None and str(down) != "nan" else None,
+                        "up_30d": int(up30) if up30 is not None and str(up30) != "nan" else None,
+                        "down_30d": int(down30) if down30 is not None and str(down30) != "nan" else None,
+                    }
+        except Exception:
+            pass
+        result["eps_revisions"] = eps_revisions
+
+        # Long-term growth estimates
+        growth_estimates = {}
+        try:
+            ge = stock.growth_estimates
+            if ge is not None and not ge.empty:
+                df = ge.reset_index()
+                for _, row in df.iterrows():
+                    period = str(row.get("Period", row.iloc[0] if len(row) > 0 else ""))
+                    val = row.get(ticker.upper(), row.get("Value", None))
+                    if val is None:
+                        for col in df.columns:
+                            if col not in ("Period", "index"):
+                                val = row[col]
+                                break
+                    growth_estimates[period] = float(val) if val is not None and str(val) != "nan" else None
+        except Exception:
+            pass
+        result["growth_estimates"] = growth_estimates
+
+        return result
+    except Exception as e:
+        return {"ticker": ticker, "error": str(e)}
+
+
 def get_insider_trades_raw(ticker: str) -> dict:
     """Fetch recent insider transactions from SEC Form 4 filings via yfinance."""
     import yfinance as yf

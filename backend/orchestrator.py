@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from tools.yfinance_tool import get_stock_financials, get_price_history_raw, get_insider_trades_raw
+from tools.yfinance_tool import get_stock_financials, get_price_history_raw, get_insider_trades_raw, get_earnings_data_raw
 from tools.tavily_tool import search_comparable_companies, search_analyst_news
 from tools.edgar_tool import get_10k_risk_factors
 
@@ -196,6 +196,7 @@ writer_agent = Agent(
         "### Risk Factors\n"
         "### Path to Upside — What Needs to Change\n"
         "### Investment Signal\n"
+        "### Earnings History & Forward Estimates\n"
         "### Insider Activity\n"
         "### Data Sources & As-Of Dates\n\n"
         "Formatting rules:\n"
@@ -220,6 +221,16 @@ writer_agent = Agent(
         "Bold the most company-specific, material risks.\n"
         "- Path to Upside: numbered list of what_needs_to_change with current vs. required figures. "
         "Bear/Base/Bull scenario table. Near-term catalysts table.\n"
+        "- Earnings History & Forward Estimates:\n"
+        "  1. Historical EPS table (last 6-8 quarters): Quarter | EPS Estimate | EPS Actual | Surprise % | Beat/Miss\n"
+        "     Color-code in text: note consecutive beats or misses as a pattern.\n"
+        "  2. Next earnings date (if available): bold it, note days until event.\n"
+        "  3. Forward EPS estimates table: Period | EPS Low | EPS Avg | EPS High | # Analysts\n"
+        "  4. Revenue estimates table: Period | Rev Low | Rev Avg | Rev High | YoY Growth Est\n"
+        "  5. EPS revisions: note whether analysts are raising or cutting estimates over last 30 days "
+        "(use eps_revisions data — more ups than downs = positive revision momentum).\n"
+        "  6. Long-term growth estimates: show 5yr growth estimate if available.\n"
+        "  If any sub-section data is missing, note it briefly and move on.\n"
         "- Insider Activity: table of recent trades (Date | Insider | Title | Transaction | Shares | Value). "
         "Show net_signal as a badge (Bullish/Bearish/Neutral) with buys vs sells count. "
         "Include 1-2 sentences interpreting the insider activity. "
@@ -302,13 +313,14 @@ async def run_research_pipeline(ticker: str) -> AsyncGenerator[str, None]:
     yield sse({"stage": "analyst_coverage", "status": "running"})
 
     loop = asyncio.get_event_loop()
-    financial_raw, comps_raw, risk_raw, coverage_raw, price_history, insider_data = await asyncio.gather(
+    financial_raw, comps_raw, risk_raw, coverage_raw, price_history, insider_data, earnings_data = await asyncio.gather(
         run_agent(financial_data_agent, f"Fetch financial data for ticker: {ticker}"),
         run_agent(comps_agent, f"Find comparable companies for ticker: {ticker}"),
         run_agent(risk_agent, f"Get 10-K risk factors for ticker: {ticker}"),
         run_agent(analyst_coverage_agent, f"Get analyst coverage and consensus for ticker: {ticker}"),
         loop.run_in_executor(None, get_price_history_raw, ticker),
         loop.run_in_executor(None, get_insider_trades_raw, ticker),
+        loop.run_in_executor(None, get_earnings_data_raw, ticker),
     )
 
     # Stream price data immediately so chart renders before the report is ready
@@ -345,6 +357,7 @@ async def run_research_pipeline(ticker: str) -> AsyncGenerator[str, None]:
             "risk_summary": risk_data,
             "analyst_coverage": coverage_data,
             "insider_activity": insider_data,
+            "earnings": earnings_data,
         },
         indent=2,
     )
@@ -407,6 +420,7 @@ async def run_research_pipeline(ticker: str) -> AsyncGenerator[str, None]:
             "catalyst_analysis": catalyst_data,
             "analyst_verdict": analyst_verdict,
             "insider_activity": insider_data,
+            "earnings": earnings_data,
         },
         indent=2,
     )
