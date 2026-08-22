@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+from datetime import date, timedelta
 from typing import AsyncGenerator
 
 from agents import Agent, Runner
@@ -33,16 +34,24 @@ comps_agent = Agent(
     name="Comps Agent",
     instructions=(
         "You are a Comps Agent. Given a ticker:\n"
-        "1. Call get_stock_financials on the subject ticker to get its sector and industry.\n"
-        "2. Call search_comparable_companies with the company name, sector, and industry.\n"
-        "3. Parse the search results to identify 4-6 candidate tickers.\n"
-        "4. Call get_stock_financials for each candidate to verify it resolves and fetch multiples.\n"
-        "5. Select the 3-5 best comparable companies (same sector, similar model or market-cap tier).\n"
-        "Return a JSON array of peer objects with these fields: "
-        "ticker, company_name, pe_trailing, pe_forward, ev_ebitda, revenue_ttm, "
-        "gross_margin, operating_margin, justification.\n"
-        "justification is a 1-sentence explanation of why this company is a valid comp.\n"
-        "Output ONLY a valid JSON array, no prose."
+        "1. Call get_stock_financials on the subject ticker to get its sector, industry, and market_cap.\n"
+        "2. Convert market_cap (in raw dollars) to billions: market_cap_billions = market_cap / 1e9.\n"
+        "3. Call search_comparable_companies with company_name, sector, industry, and market_cap_billions.\n"
+        "4. Parse the search results to identify candidate tickers.\n"
+        "5. Call get_stock_financials for each candidate.\n"
+        "6. Apply these MANDATORY filters — reject any candidate that fails either:\n"
+        "   a) Market cap outside 0.05x–20x of the subject's market cap\n"
+        "   b) Fundamentally different business model (e.g., pure hardware vs. software+services hybrid)\n"
+        "7. Select the 3-5 best remaining comps. Prefer direct competitors analysts cite as peers.\n"
+        "Return a JSON object with:\n"
+        "  subject: {ticker, company_name, market_cap_billions, pe_trailing, pe_forward, ev_ebitda, "
+        "gross_margin, operating_margin, revenue_ttm}\n"
+        "  peers: array of peer objects with: ticker, company_name, market_cap_billions, pe_trailing, "
+        "pe_forward, ev_ebitda, revenue_ttm, gross_margin, operating_margin, justification\n"
+        "  peer_median: {pe_trailing, pe_forward, ev_ebitda, gross_margin, operating_margin}\n"
+        "  premium_discount: {pe_trailing_pct, pe_forward_pct, ev_ebitda_pct} — subject vs peer median\n"
+        "  comps_quality_note: 1 sentence rating the quality/relevance of these comps\n"
+        "Output ONLY valid JSON, no prose."
     ),
     tools=[get_stock_financials, search_comparable_companies],
     model="gpt-4o",
@@ -57,9 +66,14 @@ risk_agent = Agent(
         "  status: 'ok'\n"
         "  filing_type: the form type from the tool result\n"
         "  filing_date: the filing date from the tool result\n"
-        "  risks: array of 5-7 objects each with title (short noun phrase), "
-        "summary (1-2 sentences plain English, no legal boilerplate), "
-        "severity ('High'/'Medium'/'Low' based on threat to revenue/margin/going-concern)\n"
+        "  risks: array of 5-7 objects each with:\n"
+        "    title: short noun phrase (specific, not generic boilerplate)\n"
+        "    summary: 2-3 sentences plain English — cite specific figures, jurisdictions, or thresholds "
+        "where present. No generic statements like 'macroeconomic conditions may affect revenue'.\n"
+        "    severity: 'High'/'Medium'/'Low' based on realistic threat to revenue/margin/going-concern\n"
+        "    category: one of 'Regulatory', 'Competitive', 'Macro', 'Operational', 'Financial', 'Geopolitical'\n"
+        "Prioritize risks that are SPECIFIC to this company and material to its investment thesis. "
+        "Avoid boilerplate risks that apply to every public company.\n"
         "Output ONLY valid JSON, no prose."
     ),
     tools=[get_10k_risk_factors],
@@ -70,22 +84,26 @@ analyst_coverage_agent = Agent(
     name="Analyst Coverage Agent",
     instructions=(
         "You are an Analyst Coverage Agent. Given a ticker:\n"
-        "1. Call get_stock_financials to get the consensus target prices, recommendation_key, "
+        "1. Call get_stock_financials to get consensus target prices, recommendation_key, "
         "num_analyst_opinions, and recent_recommendations.\n"
         "2. Call search_analyst_news to find recent analyst upgrades, downgrades, initiations, "
         "and price target changes from Wall Street firms.\n"
+        f"3. Today's date is {date.today().isoformat()}. Flag any analyst call older than 90 days "
+        "with a staleness warning. Exclude calls older than 12 months from consensus metrics.\n"
         "Return a JSON object with:\n"
         "  consensus_recommendation: human-readable string (e.g. 'Buy', 'Hold', 'Strong Buy')\n"
         "  num_analysts: integer\n"
-        "  target_price_consensus: float (mean/median target)\n"
+        "  target_price_consensus: float (mean target from yfinance — most reliable source)\n"
         "  target_price_low: float\n"
         "  target_price_high: float\n"
         "  current_price: float\n"
-        "  implied_upside_pct: float (% upside from current to consensus target)\n"
+        "  implied_upside_pct: float\n"
+        "  data_as_of: today's date string\n"
         "  recent_calls: array of up to 8 objects with "
-        "{firm, action, rating, price_target, date} extracted from search results\n"
-        "  sentiment_summary: 3-4 sentence synthesis of overall analyst sentiment, "
-        "noting any notable disagreements or conviction calls\n"
+        "{firm, action, rating, price_target, date, is_stale (bool, true if >90 days old)}\n"
+        "  stale_calls_excluded: integer count of calls excluded for being >12 months old\n"
+        "  data_freshness_note: 1-2 sentences on how fresh the analyst data is and any caveats\n"
+        "  sentiment_summary: 3-4 sentence synthesis of overall analyst sentiment\n"
         "Output ONLY valid JSON, no prose."
     ),
     tools=[get_stock_financials, search_analyst_news],
@@ -111,9 +129,8 @@ catalyst_agent = Agent(
         "  bear_case: {narrative: string, key_risk: string, implied_price: float or null}\n"
         "  base_case: {narrative: string, key_driver: string, implied_price: float or null}\n"
         "  bull_case: {narrative: string, key_catalyst: string, implied_price: float or null}\n"
-        "  multiple_re_rating_needed: boolean — true if the stock must expand its multiple "
-        "(not just grow earnings) to reach the analyst consensus target\n"
-        "  re_rating_rationale: string — explain why or why not\n"
+        "  multiple_re_rating_needed: boolean\n"
+        "  re_rating_rationale: string\n"
         "Be specific. Reference actual numbers from the inputs. No generic statements.\n"
         "Output ONLY valid JSON, no prose."
     ),
@@ -124,15 +141,30 @@ catalyst_agent = Agent(
 analyst_agent = Agent(
     name="Analyst Agent",
     instructions=(
-        "You are the Analyst Agent. You receive JSON with financial_snapshot, comps, and risk_summary.\n"
+        "You are the Analyst Agent. You receive JSON with financial_snapshot, comps, risk_summary, "
+        "and analyst_coverage.\n"
         "Produce a JSON object:\n"
         "  signal: exactly 'BUY', 'HOLD', or 'SELL'\n"
-        "  confidence: 'High', 'Medium', or 'Low' (lower if data is incomplete)\n"
-        "  rationale: paragraph citing at least one valuation metric, one risk factor, "
-        "and one growth/margin trend WITH specific numbers — no generic statements\n"
+        "  confidence: 'High', 'Medium', or 'Low'\n"
+        "  confidence_drivers: array of 2-4 strings — list the specific inputs that most drove or "
+        "limited your confidence (e.g. 'Strong earnings growth trajectory', 'Stale analyst data — "
+        "most calls >6 months old', 'Comps set is thin/poorly matched', 'No balance sheet data'). "
+        "ALWAYS populate this — never leave empty. This is how readers know what to trust.\n"
+        "  rationale: paragraph citing at least one valuation metric, one risk factor, and one "
+        "growth/margin trend WITH specific numbers — no generic statements\n"
+        "  valuation_context: object with:\n"
+        "    current_pe_trailing: float\n"
+        "    current_pe_forward: float\n"
+        "    peer_median_pe_forward: float or null\n"
+        "    premium_to_peers_pct: float or null\n"
+        "    valuation_assessment: 'Rich'/'Fair'/'Cheap' with 1-sentence rationale\n"
+        "  capital_return_summary: 2-3 sentences covering dividend yield, buyback program, "
+        "net cash/debt position — use data from financial_snapshot\n"
         "  comps_analysis: object with pe, ev_ebitda, revenue keys each containing "
         "{subject, peer_median, premium_discount_pct}\n"
-        "  risk_summary: 2-3 sentence synthesis of the key risks\n"
+        "  risk_summary: 2-3 sentence synthesis of the highest-severity risks\n"
+        "  data_quality_flags: array of strings — list any data quality issues: stale analyst calls, "
+        "thin comps set, missing balance sheet, etc. Empty array if no issues.\n"
         "This is for educational/research purposes — do not frame as personalized financial advice.\n"
         "Output ONLY valid JSON, no prose."
     ),
@@ -148,21 +180,36 @@ writer_agent = Agent(
         "## {TICKER} — {Company Name} Research Report\n"
         "### Company Overview\n"
         "### Key Financials\n"
+        "### Balance Sheet & Capital Returns\n"
+        "### Revenue & Margin Trends\n"
         "### Peer Comparison\n"
         "### Analyst Coverage & Consensus\n"
         "### Risk Factors\n"
         "### Path to Upside — What Needs to Change\n"
         "### Investment Signal\n"
         "### Data Sources & As-Of Dates\n\n"
-        "Use Markdown tables for financials, peer comparison, and analyst calls. Keep prose concise.\n"
-        "For Risk Factors, include severity tags like **[High]**, **[Medium]**, **[Low]** inline.\n"
-        "For Analyst Coverage, include a table of recent analyst calls (Firm | Action | Rating | Target | Date) "
-        "and note the consensus target vs current price with implied upside %.\n"
-        "For Path to Upside, list the what_needs_to_change items as a numbered list with current vs required "
-        "figures clearly shown. Include the bear/base/bull scenario table. List near-term catalysts with "
-        "impact and direction tags.\n"
-        "Note any missing data in the relevant section rather than silently omitting it.\n"
-        "Always include this disclaimer line at the end of Investment Signal:\n"
+        "Formatting rules:\n"
+        "- Use Markdown tables for: Key Financials, Peer Comparison, analyst calls, scenarios.\n"
+        "- Key Financials table: include price, market cap, PE trailing/forward, EV/EBITDA, PEG, "
+        "P/S, gross margin, operating margin, net margin, EPS trailing/forward, revenue TTM.\n"
+        "- Balance Sheet & Capital Returns: table with total debt, total cash, net cash/debt, "
+        "D/E ratio, dividend yield, annual dividend rate, shares outstanding, shares trend "
+        "(note if shrinking = buybacks). 1-2 sentences on capital return program significance.\n"
+        "- Revenue & Margin Trends: show YoY revenue growth rates for the past 3 years. "
+        "Show quarterly revenue for last 4 quarters if available. Note whether gross/operating "
+        "margins are expanding or contracting vs. prior year. Flag segment mix if known.\n"
+        "- Peer Comparison: table with all peers. Note the comps_quality_note below the table. "
+        "Show premium/discount to peer median for PE and EV/EBITDA.\n"
+        "- Analyst Coverage: table of recent calls (Firm | Action | Rating | Target | Date). "
+        "Mark stale calls (>90 days) with ⚠ STALE. Show data_freshness_note as a callout.\n"
+        "- Risk Factors: include severity [High/Medium/Low] and category tags. "
+        "Bold the most company-specific, material risks.\n"
+        "- Path to Upside: numbered list of what_needs_to_change with current vs. required figures. "
+        "Bear/Base/Bull scenario table. Near-term catalysts table.\n"
+        "- Investment Signal: show signal, confidence, confidence_drivers as a bulleted list, "
+        "valuation_assessment, capital_return_summary, and rationale. "
+        "If data_quality_flags is non-empty, show a ⚠ Data Quality Notice section listing them.\n"
+        "Always add this disclaimer:\n"
         "> This report is generated for educational purposes and is not personalized investment advice.\n"
         "Output ONLY the Markdown report, no extra commentary."
     ),
@@ -184,7 +231,6 @@ def safe_parse(raw: str, default):
     try:
         return json.loads(raw)
     except Exception:
-        # Try to extract the first JSON object or array
         for pattern in (r"\{[\s\S]*\}", r"\[[\s\S]*\]"):
             match = re.search(pattern, raw)
             if match:
@@ -250,14 +296,20 @@ async def run_research_pipeline(ticker: str) -> AsyncGenerator[str, None]:
     yield sse({"stage": "analyst_coverage", "status": "done"})
 
     financial_data = safe_parse(financial_raw, {"error": "Financial data unavailable", "ticker": ticker})
-    comps_data = safe_parse(comps_raw, [])
+    comps_data = safe_parse(comps_raw, {"peers": [], "comps_quality_note": "No comps data available."})
     risk_data = safe_parse(
         risk_raw,
         {"status": "not_available", "risks": [], "reason": "Risk data unavailable"},
     )
     coverage_data = safe_parse(
         coverage_raw,
-        {"consensus_recommendation": "N/A", "recent_calls": [], "sentiment_summary": "Data unavailable."},
+        {
+            "consensus_recommendation": "N/A",
+            "recent_calls": [],
+            "sentiment_summary": "Data unavailable.",
+            "data_freshness_note": "No analyst data retrieved.",
+            "stale_calls_excluded": 0,
+        },
     )
 
     # Analyst verdict
@@ -280,9 +332,11 @@ async def run_research_pipeline(ticker: str) -> AsyncGenerator[str, None]:
         {
             "signal": "HOLD",
             "confidence": "Low",
+            "confidence_drivers": ["Insufficient data for analysis"],
             "rationale": "Insufficient data for analysis.",
             "comps_analysis": {},
             "risk_summary": "Data unavailable.",
+            "data_quality_flags": ["Insufficient data"],
         },
     )
     yield sse({"stage": "analyst", "status": "done"})
